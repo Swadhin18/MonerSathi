@@ -12,10 +12,10 @@ const SYSTEM_PROMPT = `তুমি মনেরসাথী - একটি স�
 7. ছোট এবং অর্থপূর্ণ উত্তর দাও (২-৩ বাক্য)
 8. মানসিক অবস্থা অনুযায়ী সমর্থন প্রদান করো
 
-উত্তর ফর্ম্যাট (শুধুমাত্র JSON):
+অবশ্যই JSON ফর্ম্যাটে উত্তর দাও:
 {
-  "mood": "sad" | "anxious" | "positive" | "neutral",
-  "response": "তোমার বাংলা উত্তর"
+  "mood": "sad" অথবা "anxious" অথবা "positive" অথবা "neutral",
+  "response": "তোমার বাংলা উত্তর এখানে"
 }`;
 
 export interface AIResponse {
@@ -28,7 +28,7 @@ export interface MessageContext {
   content: string;
 }
 
-export type AIProvider = "openai" | "gemini" | "anthropic";
+export type AIProvider = "openai" | "gemini";
 
 // Gemini API implementation (FREE tier available)
 async function generateGeminiResponse(
@@ -41,17 +41,16 @@ async function generateGeminiResponse(
     throw new Error("Gemini API key not configured");
   }
 
-  const contents = conversationHistory.map(msg => ({
-    role: msg.role === "user" ? "user" : "model",
-    parts: [{ text: msg.content }]
-  }));
+  const historyText = conversationHistory.slice(-4).map(msg =>
+    `${msg.role === 'user' ? 'ব্যবহারকারী' : 'সহায়ক'}: ${msg.content}`
+  ).join('\n');
 
-  contents.push({
-    role: "user",
-    parts: [{ text: userMessage }]
-  });
+  const prompt = `${SYSTEM_PROMPT}
 
-  const combinedPrompt = `${SYSTEM_PROMPT}\n\nUser message: ${userMessage}\n\nRespond in JSON format only with 'mood' and 'response' fields.`;
+${historyText ? `পূর্ববর্তী কথোপকথন:\n${historyText}\n` : ''}
+ব্যবহারকারীর বর্তমান বার্তা: "${userMessage}"
+
+JSON আকারে উত্তর দাও (অন্য কিছু নয়):`;
 
   try {
     const response = await fetch(
@@ -64,7 +63,7 @@ async function generateGeminiResponse(
         body: JSON.stringify({
           contents: [{
             role: "user",
-            parts: [{ text: combinedPrompt }]
+            parts: [{ text: prompt }]
           }],
           generationConfig: {
             temperature: 0.7,
@@ -96,41 +95,98 @@ async function generateGeminiResponse(
 
     if (!response.ok) {
       const errorData = await response.json();
+      console.error("Gemini API Error Response:", JSON.stringify(errorData, null, 2));
       throw new Error(`Gemini API error: ${errorData.error?.message || "Unknown error"}`);
     }
 
     const data = await response.json();
+    console.log("Gemini API Response:", JSON.stringify(data, null, 2));
+
     const content = data.candidates?.[0]?.content?.parts?.[0]?.text;
 
     if (!content) {
+      console.error("No content in response:", JSON.stringify(data, null, 2));
       throw new Error("Empty response from Gemini");
     }
 
-    // Parse JSON from response
-    try {
-      // Try to extract JSON from the response
-      const jsonMatch = content.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        const mood = parsed.mood?.toLowerCase() || "neutral";
-        const validMoods = ["sad", "anxious", "positive", "neutral"];
+    // Parse JSON from response - try multiple extraction methods
+    let mood: AIResponse["mood"] = "neutral";
+    let responseText = content;
 
+    // Method 1: Direct parse if whole response is JSON
+    try {
+      const direct = JSON.parse(content.trim());
+      if (direct.mood && direct.response) {
+        console.log("Direct JSON parse successful");
+        const validMoods = ["sad", "anxious", "positive", "neutral"];
         return {
-          mood: validMoods.includes(mood) ? mood as AIResponse["mood"] : "neutral",
-          response: parsed.response || content,
+          mood: validMoods.includes(direct.mood.toLowerCase()) ? direct.mood.toLowerCase() as AIResponse["mood"] : "neutral",
+          response: direct.response,
         };
       }
-    } catch (parseError) {
-      // If JSON parsing fails, extract text response
-      return {
-        mood: "neutral",
-        response: content,
-      };
+    } catch (e) {
+      // Not direct JSON, continue to other methods
     }
 
+    // Method 2: Extract JSON from markdown code blocks
+    const codeBlockMatch = content.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+    if (codeBlockMatch) {
+      try {
+        const parsed = JSON.parse(codeBlockMatch[1]);
+        console.log("Code block JSON extraction successful");
+        const validMoods = ["sad", "anxious", "positive", "neutral"];
+        if (parsed.mood && parsed.response) {
+          return {
+            mood: validMoods.includes(parsed.mood.toLowerCase()) ? parsed.mood.toLowerCase() as AIResponse["mood"] : "neutral",
+            response: parsed.response,
+          };
+        }
+      } catch (e) {
+        console.log("Code block parse failed:", e);
+      }
+    }
+
+    // Method 3: Extract any JSON object
+    const jsonMatch = content.match(/\{[\s\S]*?"mood"[\s\S]*?"response"[\s\S]*?\}/);
+    if (jsonMatch) {
+      try {
+        const parsed = JSON.parse(jsonMatch[0]);
+        console.log("JSON object extraction successful");
+        const validMoods = ["sad", "anxious", "positive", "neutral"];
+        if (parsed.mood && parsed.response) {
+          return {
+            mood: validMoods.includes(parsed.mood.toLowerCase()) ? parsed.mood.toLowerCase() as AIResponse["mood"] : "neutral",
+            response: parsed.response,
+          };
+        }
+      } catch (e) {
+        console.log("JSON object parse failed:", e);
+      }
+    }
+
+    // Method 4: Fallback - detect mood from content keywords
+    console.log("Falling back to keyword-based mood detection");
+    const lowerContent = content.toLowerCase();
+
+    if (lowerContent.includes('দুঃখ') || lowerContent.includes('কষ্ট') || lowerContent.includes('দুঃখিত')) {
+      mood = "sad";
+    } else if (lowerContent.includes('উদ্বেগ') || lowerContent.includes('চিন্তিত') || lowerContent.includes('ভয়')) {
+      mood = "anxious";
+    } else if (lowerContent.includes('ভালো') || lowerContent.includes('আনন্দ') || lowerContent.includes('খুশি')) {
+      mood = "positive";
+    }
+
+    // Clean the response - remove any JSON formatting artifacts
+    responseText = content
+      .replace(/```json\n?/g, '')
+      .replace(/```\n?/g, '')
+      .replace(/\{[\s\S]*"mood"[\s\S]*"response"[\s\S]*\}/, '')
+      .replace(/^[{\n\r\t]+/, '')
+      .trim();
+
     return {
-      mood: "neutral",
-      response: content,
+      mood,
+      response: responseText || content,
     };
   } catch (error) {
     console.error("Gemini Error:", error);
@@ -173,10 +229,13 @@ async function generateOpenAIResponse(
 
     if (!response.ok) {
       const errorData = await response.json();
+      console.error("OpenAI API Error:", JSON.stringify(errorData, null, 2));
       throw new Error(`OpenAI API error: ${errorData.error?.message || "Unknown error"}`);
     }
 
     const data = await response.json();
+    console.log("OpenAI API Response:", JSON.stringify(data, null, 2));
+
     const content = data.choices[0]?.message?.content;
 
     if (!content) {
@@ -193,6 +252,7 @@ async function generateOpenAIResponse(
         response: parsed.response || "আমি তোমার কথা বুঝতে পেরেছি। আরো কিছু জানাতে চাও?",
       };
     } catch (parseError) {
+      console.log("OpenAI JSON parse failed, using fallback");
       return {
         mood: "neutral",
         response: content,
@@ -210,6 +270,8 @@ export async function generateAIResponse(
   conversationHistory: MessageContext[] = []
 ): Promise<AIResponse> {
   const provider = (Deno.env.get("AI_PROVIDER") || "gemini").toLowerCase() as AIProvider;
+
+  console.log(`Using AI provider: ${provider}`);
 
   // Try primary provider
   try {
